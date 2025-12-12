@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import csv
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +9,7 @@ import requests
 
 dotenv.load_dotenv()
 CMC_API_KEY = os.getenv("CMC_API_KEY", "123")
+FILE_NAME = "output_cmc_llama.csv"
 
 ## Functions
 
@@ -31,7 +31,6 @@ def ensure_csv_exists(path: Path) -> None:
                     "ton_price_received_at",   # when TON request was made
                     "volume_usd_float",        # volume_usd as float (Ston.fi)
                     "volume_usd_received_at",  # when Ston.fi request was made
-                    "volume_usd_str",          # volume_usd as string (Ston.fi)
                 ]
             )
 
@@ -41,7 +40,7 @@ def fetch_ton_price(started_at: datetime = None):
     Returns (price: float | None, received_at: datetime).
     If request fails, returns (None, received_at).
     """
-    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest" # v2/cryptocurrency/quotes/latest can be also used
     params = {
         "symbol": "TON",
         "convert": "USD",
@@ -65,7 +64,7 @@ def fetch_ton_price(started_at: datetime = None):
             message = status.get("error_message")
             raise RuntimeError(f"CoinMarketCap error: {message}")
 
-        price = float(data["data"]["TON"]["quote"]["USD"]["price"])
+        price = float(data["data"]["TON"]["quote"]["USD"]["price"]) # in case of v2: data["data"]["TON"][0]["quote"]["USD"]["price"]
         ended_at = datetime.now()
         print(f"TON price fetched: {price} USD (request time: {ended_at - started_at})")
         return price, ended_at
@@ -73,7 +72,7 @@ def fetch_ton_price(started_at: datetime = None):
         print(f"CoinMarketCap request failed: {exc}")
         return None, started_at
 
-
+#--- Ignore this function ---
 def fetch_dex_volume(started_at: datetime = None):
     """
     Call Ston.fi API to get DEX stats.
@@ -99,6 +98,31 @@ def fetch_dex_volume(started_at: datetime = None):
     except Exception as exc:
         print(f"Ston.fi request failed: {exc}")
         return None, None, started_at
+    
+
+def fetch_dex_volume_llama(started_at: datetime = None):
+    """
+    Call defillama API to get STON.fi stats.
+    Returns (volume_float: float | None, received_at: datetime).
+    If request fails, returns (None, received_at).
+    """
+    url = 'https://api.llama.fi/summary/dexs/ston.fi'
+
+    if started_at is None:
+        started_at = datetime.now()
+
+    try:
+        response = requests.get(url, params={'excludeTotalDataChart': 'true', 'excludeTotalDataChartBreakdown': 'true'})
+        response.raise_for_status()
+
+        data = response.json()
+        volume_float = float(data['totalAllTime'])
+        ended_at = datetime.now()
+        print(f"DEX volume fetched: {volume_float} USD (request time: {ended_at - started_at})")   
+        return volume_float, ended_at
+    except Exception as exc:
+        print(f"Ston.fi request failed: {exc}")
+        return None,  started_at
 
 ## Main script
 
@@ -108,7 +132,7 @@ def main():
             "Set your CoinMarketCap API key in the CMC_API_KEY environment variable."
         )
 
-    csv_path = Path("./output.csv")
+    csv_path = Path("./") / FILE_NAME
     ensure_csv_exists(csv_path)
 
     now = datetime.now()
@@ -117,10 +141,10 @@ def main():
     # Run requests in parallel
     with ThreadPoolExecutor(max_workers=2) as pool:
         future_price = pool.submit(fetch_ton_price, started_at=now)
-        future_volume = pool.submit(fetch_dex_volume, started_at=now)
+        future_volume = pool.submit(fetch_dex_volume_llama, started_at=now)
 
         ton_price, ton_price_ts = future_price.result()
-        volume_float, volume_str, volume_ts = future_volume.result()
+        volume_float, volume_ts = future_volume.result()
 
     # Append row into CSV
     with csv_path.open("a", newline="", encoding="utf-8") as f:
@@ -133,7 +157,6 @@ def main():
                 ton_price_ts.isoformat(),
                 volume_float,
                 volume_ts.isoformat(),
-                volume_str,
             ]
         )
 
@@ -143,19 +166,16 @@ def main():
 if __name__ == "__main__":
     main()
 
-# Store data in google bucket --- IGNORE ---
-# from google.cloud import storage
-# def upload_to_gcs(bucket_name: str, source_file_name: str, destination_blob_name: str):
-#     """Uploads a file to the bucket."""
-#     storage_client = storage.Client()
-#     bucket = storage_client.bucket(bucket_name)       
 
+# ------------------------------------------
+# -- Extra code for Cloud Run environment --
+# ------------------------------------------
 
 
 def is_running_in_cloud_run() -> bool:
     """
     Detect if the code is running in Cloud Run (service or job).
-    Cloud Run services set K_SERVICE, jobs set CLOUD_RUN_JOB. 
+    Cloud Run services set K_SERVICE, jobs set CLOUD_RUN_JOB by default. 
     """
     return bool(
         os.getenv("CLOUD_RUN_JOB")  # Cloud Run job
@@ -163,7 +183,7 @@ def is_running_in_cloud_run() -> bool:
     )
 
 
-def upload_last_row_to_gcs(local_csv: Path, bucket_name: str, object_name: str = "output.csv",) -> None:
+def upload_last_row_to_gcs(local_csv: Path, bucket_name: str, object_name: str = FILE_NAME,) -> None:
     """
     Append the last row from local CSV into a CSV object in GCS bucket.
     If the object does not exist, create it with header + last row.
@@ -215,7 +235,7 @@ def upload_last_row_to_gcs(local_csv: Path, bucket_name: str, object_name: str =
 
 
 if is_running_in_cloud_run():
-    csv_path = Path("./output.csv")
+    csv_path = Path("./") / FILE_NAME
     bucket_name = "ton_info_hourly"
     upload_last_row_to_gcs(csv_path, bucket_name=bucket_name)
     print(f"Data uploaded to GCS bucket {bucket_name}.")
